@@ -76,9 +76,11 @@ class AX520Programmer:
             logger.error(f"Error sending data: {e}")
             return False
 
-    def _recv(self, expected_cmd=None, timeout=None):
+    def _recv(self, expected_cmd=None, timeout=None, len=0):
         """Receive a command from the device."""
         start_time = time.time()
+        stack = []
+        recevied_len = 0
         while True:
             if timeout and (time.time() - start_time) > timeout:
                 logger.debug("Receive timeout")
@@ -98,11 +100,20 @@ class AX520Programmer:
             end_byte = self.serial_port.read(1)
             if end_byte != self.END_BYTE:
                 continue
+            if len > 0:
+                # Drop an unknown byte
+                while len - recevied_len > 0:
+                    stack.append(self.serial_port.read(1)[0])
+                    recevied_len += 1
+                    # logger.debug(f"RCV LEN: {recevied_len}")
             logger.debug(f"Received command {cmd}")
             if expected_cmd and cmd != expected_cmd:
                 logger.error(f"Expected command {expected_cmd}, but received {cmd}")
                 return None
-            return cmd
+            if len > 0:
+                return cmd, stack
+            else:
+                return cmd
 
     def handshake(self, timeout=10):
         """Perform handshake with the device."""
@@ -273,28 +284,6 @@ class AX520Programmer:
             logger.error("Failed to start the device")
             return False
 
-    def read_memory(self, address, size):
-        """Read memory content starting from a specific address."""
-        if size % 4 != 0:
-            logger.error("Read size must be a multiple of 4")
-            return None
-        word_count = size // 4
-        payload = struct.pack('>II', address, word_count)
-        if not self._send(self.READ_CMD, payload):
-            logger.error("Failed to send READ command")
-            return None
-        ack = self._recv(expected_cmd=self.READ_CMD, timeout=1)
-        if ack != self.READ_CMD:
-            logger.error("Failed to receive READ response")
-            return None
-        # Read the data
-        data = self.serial_port.read(size)
-        if len(data) != size:
-            logger.error("Incomplete data received")
-            return None
-        logger.debug(f"Read {size} bytes from address {address:#010x}")
-        return data
-
     def write_memory(self, address, data):
         """Write a double word to a 4-byte aligned address."""
         if not isinstance(data, int):
@@ -312,6 +301,100 @@ class AX520Programmer:
             logger.error("Failed to write memory")
             return False
 
+    def read_memory(self, address, size):
+        """Read memory content starting from a specific address."""
+        data = b''
+        pos = 0
+        total_size = size
+        chunk_size = self.MAX_BUFFER_SIZE
+        logging.debug(f"Reading {total_size} bytes from address {address:#010x}")
+        while pos < total_size:
+            remaining = total_size - pos
+            if remaining < chunk_size:
+                chunk_size = remaining
+            # Size must be a multiple of 4
+            if chunk_size % 4 != 0:
+                chunk_size += (4 - (chunk_size % 4))
+            word_count = chunk_size // 4
+            payload = struct.pack('>II', address + pos, word_count)
+            if not self._send(self.READ_CMD, payload):
+                logging.error("Failed to send READ command")
+                return None
+            
+            try:
+                ack, chunk_data = self._recv(timeout=5, len=chunk_size)
+                self._recv(timeout=1)
+            except:
+                logging.error("Failed to receive data")
+                return None
+            
+            data += bytes(chunk_data[:remaining])  # Only take the needed bytes
+            pos += chunk_size
+        return data
+
+    def dump_firmware(self, address, length):
+        """Verify the firmware by reading back from the device and comparing."""
+
+        total_size = length + (4 - length % 4)
+        pos = 0
+        chunk_size = self.MAX_BUFFER_SIZE
+        firmware = b''
+        logging.info(f"Reading firmware at address {address:#010x} with length {total_size:#010x}")
+        with tqdm(total=total_size, unit='B', unit_scale=True, desc='Verifying') as pbar:
+            while pos < total_size:
+                remaining = total_size - pos
+                if remaining < chunk_size:
+                    chunk_size = remaining
+                # Read chunk from device
+                read_data = self.read_memory(address + pos, chunk_size)
+                if read_data is None:
+                    logging.error("Failed to read memory for verification")
+                    return False
+                firmware += read_data
+                pos += len(read_data)
+                pbar.update(len(read_data))
+        logging.info("Firmware read successful")
+        return firmware[:length]
+    
+    def verify_firmware(self, address, firmware_data):
+        """Verify the firmware by reading back from the device and comparing."""
+        # Ensure firmware data is 4-byte aligned
+        if len(firmware_data) % 4 != 0:
+            padding = b'\xFF' * (4 - len(firmware_data) % 4)
+            firmware_data += padding
+            logging.debug(f"Firmware data padded with {len(padding)} bytes for verification")
+
+        total_size = len(firmware_data)
+        pos = 0
+        chunk_size = self.MAX_BUFFER_SIZE
+        logging.info(f"Verifying firmware at address {address:#010x} with length {total_size:#010x}")
+        with tqdm(total=total_size, unit='B', unit_scale=True, desc='Verifying') as pbar:
+            while pos < total_size:
+                remaining = total_size - pos
+                if remaining < chunk_size:
+                    chunk_size = remaining
+                # Read chunk from device
+                read_data = self.read_memory(address + pos, chunk_size)
+                if read_data is None:
+                    logging.error("Failed to read memory for verification")
+                    return False
+                # Compare with firmware data
+                expected_chunk = firmware_data[pos:pos + len(read_data)]
+                if read_data != expected_chunk:
+                    # Find the exact mismatch location
+                    for i in range(len(read_data)):
+                        if read_data[i] != expected_chunk[i]:
+                            mismatch_addr = address + pos + i
+                            logging.error(f"Data mismatch at address {mismatch_addr:#010x}: "
+                                          f"expected {expected_chunk[i]:02X}, got {read_data[i]:02X}")
+                            return False
+                    logging.error("Data mismatch found during verification")
+                    return False
+                pos += len(read_data)
+                pbar.update(len(read_data))
+        logging.info("Firmware verification successful")
+        return True
+    
     def exit(self):
         """Exit from the bootloader mode."""
         if not self._send(self.EXIT_CMD):
@@ -326,20 +409,25 @@ def main():
     parser = argparse.ArgumentParser(description="AX520 programmer tool")
     parser.add_argument("-p", "--port", required=True, help="Serial port name")
     parser.add_argument("-r", "--reboot", help="Reboot after flashing", action="store_true")
-    parser.add_argument("--check", help="Verify firmware after flashing", action="store_true")
+    parser.add_argument("-c", "--check", help="Verify firmware after flashing", action="store_true")
 
     subparsers = parser.add_subparsers(dest='command', help='Operations (burn)')
 
-    burn_parser = subparsers.add_parser('burn', help='Download firmware to the device')
-    burn_parser.add_argument('burn_args', nargs='+', help='Address and firmware file pairs')
+    write_flash_parser = subparsers.add_parser('write_flash', help='Download firmware to the device')
+    write_flash_parser.add_argument('flash_args', nargs='+', help='Address and firmware file pairs')
+
+    read_flash_parser = subparsers.add_parser('read_flash', help='Read firmware from the device')
+    read_flash_parser.add_argument('address', help='Starting address of the device')
+    read_flash_parser.add_argument('size', help='Size of reading')
+    read_flash_parser.add_argument('output_file', help='Location of the output file')
 
     args = parser.parse_args()
 
-    if args.command == 'burn':
-        burn_args = args.burn_args
-        if len(burn_args) % 2 != 0:
+    if args.command == 'write_flash':
+        flash_args = args.flash_args
+        if len(flash_args) % 2 != 0:
             parser.error("The argument list must be pairs of address and firmware file")
-        pairs = list(zip(burn_args[::2], burn_args[1::2]))
+        pairs = list(zip(flash_args[::2], flash_args[1::2]))
         # Validate addresses and firmware files
         for address_str, firmware_file in pairs:
             try:
@@ -350,6 +438,13 @@ def main():
                 parser.error(f"Invalid address: {address_str}")
             if not os.path.exists(firmware_file):
                 parser.error(f"Firmware file not found: {firmware_file}")
+    if args.command == 'read_flash':
+        address = int(args.address, 16)
+        if not (0x0 <= address <= 0xFFFFFFFF):
+            parser.error(f"Address {args.address} out of range")
+        size = int(args.size, 16)
+        if not (0x0 <= size <= 0xFFFFFFFF):
+            parser.error(f"Size {args.size} out of range")
     else:
         parser.print_help()
         return
@@ -369,33 +464,25 @@ def main():
         programmer.close_connection()
         return
 
-    for address_str, firmware_file in pairs:
-        address = int(address_str, 16)
-        with open(firmware_file, 'rb') as f:
-            firmware_data = f.read()
-        logger.info(f"Downloading {firmware_file} to address {address:#010x}")
-        if not programmer.download_firmware(address, firmware_data, autostart=False):
-            logger.error("Firmware download failed")
-            programmer.close_connection()
-            return
-        if args.check:
-            # Read back the firmware and compare
-            logger.info(f"Verifying firmware at address {address:#010x}")
-            read_size = len(firmware_data)
-            if read_size % 4 != 0:
-                read_size += (4 - read_size % 4)  # Ensure read size is multiple of 4
-            read_data = programmer.read_memory(address, read_size)
-            if read_data is None:
-                logger.error("Failed to read back firmware for verification")
+    if args.command == 'write_flash':
+        for address_str, firmware_file in pairs:
+            address = int(address_str, 16)
+            with open(firmware_file, 'rb') as f:
+                firmware_data = f.read()
+            logging.info(f"Downloading {firmware_file} to address {address:#010x}")
+            if not programmer.download_firmware(address, firmware_data, autostart=False):
+                logging.error("Firmware download failed")
                 programmer.close_connection()
                 return
-            # Trim padding bytes if any
-            expected_data = firmware_data.ljust(read_size, b'\xFF')
-            if read_data != expected_data:
-                logger.error("Firmware verification failed: data mismatch")
-                programmer.close_connection()
-                return
-            logger.info("Firmware verification successful")
+            if args.check:
+                if not programmer.verify_firmware(address, firmware_data):
+                    logging.error("Firmware verification failed")
+                    programmer.close_connection()
+                    return
+
+    if args.command == "read_flash":
+        firmware = programmer.dump_firmware(address, size)
+        open(args.output_file, 'w+b').write(firmware)
 
     if args.reboot:
         logger.info("Rebooting device")
