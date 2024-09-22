@@ -438,7 +438,7 @@ def main():
                 parser.error(f"Invalid address: {address_str}")
             if not os.path.exists(firmware_file):
                 parser.error(f"Firmware file not found: {firmware_file}")
-    if args.command == 'read_flash':
+    elif args.command == 'read_flash':
         address = int(args.address, 16)
         if not (0x0 <= address <= 0xFFFFFFFF):
             parser.error(f"Address {args.address} out of range")
