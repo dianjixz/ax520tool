@@ -158,7 +158,7 @@ class AX520Programmer:
         # Erase can take longer, so increase timeout
         ack = self._recv(expected_cmd=self.ACK_OK, timeout=20)
         if ack == self.ACK_OK:
-            logger.debug(f"Memory erased at address {address:#010x}, size {size} bytes")
+            logger.debug(f"Memory erased at address {address:#010x}, size {size:#010x} bytes")
             return True
         else:
             logger.error("Erase operation failed")
@@ -222,7 +222,7 @@ class AX520Programmer:
         page_size = 256
 
         # Erase the memory region before downloading
-        logger.info(f"Erasing memory at address {address:#010x}, size {total_size} bytes")
+        logger.info(f"Erasing memory at address {address:#010x}, size {total_size:#010x} bytes")
         if not self.erase(address, total_size):
             logger.error("Failed to erase memory")
             return False
@@ -421,6 +421,10 @@ def main():
     read_flash_parser.add_argument('size', help='Size of reading')
     read_flash_parser.add_argument('output_file', help='Location of the output file')
 
+    erase_flash_parser = subparsers.add_parser('erase_flash', help='Erase flash of the device')
+    erase_flash_parser.add_argument('address', help='Starting address of the device')
+    erase_flash_parser.add_argument('size', help='Size of reading')
+
     args = parser.parse_args()
 
     if args.command == 'write_flash':
@@ -439,6 +443,13 @@ def main():
             if not os.path.exists(firmware_file):
                 parser.error(f"Firmware file not found: {firmware_file}")
     elif args.command == 'read_flash':
+        address = int(args.address, 16)
+        if not (0x0 <= address <= 0xFFFFFFFF):
+            parser.error(f"Address {args.address} out of range")
+        size = int(args.size, 16)
+        if not (0x0 <= size <= 0xFFFFFFFF):
+            parser.error(f"Size {args.size} out of range")
+    elif args.command == 'erase_flash':
         address = int(args.address, 16)
         if not (0x0 <= address <= 0xFFFFFFFF):
             parser.error(f"Address {args.address} out of range")
@@ -483,6 +494,10 @@ def main():
     if args.command == "read_flash":
         firmware = programmer.dump_firmware(address, size)
         open(args.output_file, 'w+b').write(firmware)
+    
+    if args.command == "erase_flash":
+        logger.info(f"Erasing memory at address {address:#010x}, size {size:#010x} bytes")
+        programmer.erase(address, size)
 
     if args.reboot:
         logger.info("Rebooting device")
