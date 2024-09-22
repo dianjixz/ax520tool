@@ -233,7 +233,7 @@ class AX520Programmer:
             logger.error("Failed to send ERASE command")
             return False
         # Erase can take longer, so increase timeout
-        ack = self._recv(expected_cmd=self.ACK_OK, timeout=20)
+        ack = self._recv(expected_cmd=self.ACK_OK, timeout=60)
         if ack == self.ACK_OK:
             logger.debug(f"Memory erased at address {address:#010x}, size {size:#010x} bytes")
             return True
