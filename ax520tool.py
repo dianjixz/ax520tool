@@ -24,6 +24,11 @@ class AX520ToolException(Exception):
         def __init__(self, value):
             message = f'Input \'{value}\' is not a valid number, it need to be hex, dec or partition name.'
             super().__init__(message)
+    
+    class FileNotFound(Exception):
+        def __init__(self, value):
+            message = f'Firmware file not found at {value}'
+            super().__init__(message)
 
 class AX520BoardHelper:
     BOARD_DEFS = {
@@ -506,20 +511,24 @@ def main():
         flash_args = args.flash_args
         if len(flash_args) % 2 != 0:
             parser.error("The argument list must be pairs of address and firmware file")
-        pairs = list(zip(flash_args[::2], flash_args[1::2]))
+        str_pairs = list(zip(flash_args[::2], flash_args[1::2]))
+        pairs = []
         # Validate addresses and firmware files
-        for address_str, firmware_file in pairs:
+        for address_str, firmware_file in str_pairs:
             address = board_def.number_helper(address_str)
             board_def.check_flash_addr(address)
             if not os.path.exists(firmware_file):
-                parser.error(f"Firmware file not found: {firmware_file}")
+                raise AX520ToolException.FileNotFound(firmware_file)
+            pairs.append((address, firmware_file))
     elif args.command == 'read_flash':
         address = board_def.number_helper(args.address)
         size = board_def.number_helper(args.size)
+
         board_def.check_flash_addr(address, size=size)
     elif args.command == 'erase_flash':
         address = board_def.number_helper(args.address)
         size = board_def.number_helper(args.size)
+
         board_def.check_flash_addr(address, size=size)
     else:
         parser.print_help()
@@ -542,7 +551,7 @@ def main():
 
     if args.command == 'write_flash':
         for address_str, firmware_file in pairs:
-            address = int(address_str, 16)
+            address = address_str
             with open(firmware_file, 'rb') as f:
                 firmware_data = f.read()
 
