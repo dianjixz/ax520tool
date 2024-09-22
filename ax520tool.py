@@ -19,6 +19,11 @@ class AX520ToolException(Exception):
         def __init__(self, value, def_range):
             message = f'Address {value:#010x} is not within valid range of {def_range[0]:#010x}:{def_range[1]:#010x}'
             super().__init__(message)
+    
+    class InvalidNumberFormat(Exception):
+        def __init__(self, value):
+            message = f'Input \'{value}\' is not a valid number, it need to be hex, dec or partition name.'
+            super().__init__(message)
 
 class AX520BoardHelper:
     BOARD_DEFS = {
@@ -59,6 +64,22 @@ class AX520BoardHelper:
                 raise AX520ToolException.InvalidFlashRange(addr+size, self.defs['flash_range'])
         
         return True
+
+    def number_helper(self, number_or_str):
+        number_or_str = number_or_str.strip()
+
+        # Check if partion name
+        if number_or_str in self.defs['partition']:
+            return self.defs['partition'][number_or_str]
+
+        # Check if hex
+        if number_or_str[:2] == '0x':
+            return int(number_or_str, 16)
+        
+        try:
+            return int(number_or_str)
+        except:
+            raise AX520ToolException.InvalidNumberFormat(number_or_str)
 
 
 class AX520Programmer:
@@ -488,18 +509,17 @@ def main():
         pairs = list(zip(flash_args[::2], flash_args[1::2]))
         # Validate addresses and firmware files
         for address_str, firmware_file in pairs:
-            address = int(address_str, 16)
-            board_def.check_flash_addr(address_str)
-
+            address = board_def.number_helper(address_str)
+            board_def.check_flash_addr(address)
             if not os.path.exists(firmware_file):
                 parser.error(f"Firmware file not found: {firmware_file}")
     elif args.command == 'read_flash':
-        address = int(args.address, 16)
-        size = int(args.size, 16)
+        address = board_def.number_helper(args.address)
+        size = board_def.number_helper(args.size)
         board_def.check_flash_addr(address, size=size)
     elif args.command == 'erase_flash':
-        address = int(args.address, 16)
-        size = int(args.size, 16)
+        address = board_def.number_helper(args.address)
+        size = board_def.number_helper(args.size)
         board_def.check_flash_addr(address, size=size)
     else:
         parser.print_help()
