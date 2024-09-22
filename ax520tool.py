@@ -40,7 +40,7 @@ class AX520BoardHelper:
                 'miniboot': 0x3000000,
                 'uboot': 0x3010000,
                 'kernel': 0x3080000,
-                'rootfs': 0x3080000
+                'rootfs': 0x3380000
             }
         }
     }
