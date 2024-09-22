@@ -10,6 +10,57 @@ from tqdm import tqdm
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
+class AX520ToolException(Exception):
+    def __init__(self, message):
+        super().__init__(message)
+    
+    class InvalidFlashRange(Exception):
+        def __init__(self, value, def_range):
+            message = f'Address {value:#010x} is not within valid range of {def_range[0]:#010x}:{def_range[1]:#010x}'
+            super().__init__(message)
+
+class AX520BoardHelper:
+    BOARD_DEFS = {
+        'M5_TimerCamera520':{
+            'flash_size': 0xF42400,
+            'flash_start_addr': 0x3000000,
+            'flash_range': (0x3000000, 0x3F42400),
+            'partition': {
+                'miniboot': 0x3000000,
+                'uboot': 0x3010000,
+                'kernel': 0x3080000,
+                'rootfs': 0x3080000
+            }
+        }
+    }
+
+    def __init__(self, board_name='M5_TimerCamera520'):
+        self.board_name = board_name
+        if board_name not in self.BOARD_DEFS:
+            logger.warning(f'Unable to locate the board {board_name}, falling back to default.')
+            self.board_name = 'M5_TimerCamera520'
+        self.defs = self.BOARD_DEFS[self.board_name]
+
+    @staticmethod
+    def in_range(value, range):
+        return (value >= range[0] and value <= range[1])
+
+    def check_flash_addr(self, addr, end_addr=None, size=None):
+        if not self.in_range(addr, self.defs['flash_range']):
+            raise AX520ToolException.InvalidFlashRange(addr, self.defs['flash_range'])
+        
+        if end_addr is not None:
+            if not self.in_range(end_addr, self.defs['flash_range']):
+                raise AX520ToolException.InvalidFlashRange(end_addr, self.defs['flash_range'])
+        
+        if size is not None:
+            if not self.in_range(addr+size, self.defs['flash_range']):
+                raise AX520ToolException.InvalidFlashRange(addr+size, self.defs['flash_range'])
+        
+        return True
+
+
 class AX520Programmer:
     """AX520 Programmer for firmware operations over a serial port."""
 
@@ -407,6 +458,7 @@ class AX520Programmer:
 def main():
     """Main function to parse arguments and execute commands."""
     parser = argparse.ArgumentParser(description="AX520 programmer tool")
+    parser.add_argument("-b", "--board", default='M5_TimerCamera520', help="Board name")
     parser.add_argument("-p", "--port", required=True, help="Serial port name")
     parser.add_argument("-r", "--reboot", help="Reboot after flashing", action="store_true")
     parser.add_argument("-c", "--check", help="Verify firmware after flashing", action="store_true")
@@ -427,6 +479,8 @@ def main():
 
     args = parser.parse_args()
 
+    board_def = AX520BoardHelper(args.board)
+
     if args.command == 'write_flash':
         flash_args = args.flash_args
         if len(flash_args) % 2 != 0:
@@ -434,28 +488,19 @@ def main():
         pairs = list(zip(flash_args[::2], flash_args[1::2]))
         # Validate addresses and firmware files
         for address_str, firmware_file in pairs:
-            try:
-                address = int(address_str, 16)
-                if not (0x0 <= address <= 0xFFFFFFFF):
-                    parser.error(f"Address {address_str} out of range")
-            except ValueError:
-                parser.error(f"Invalid address: {address_str}")
+            address = int(address_str, 16)
+            board_def.check_flash_addr(address_str)
+
             if not os.path.exists(firmware_file):
                 parser.error(f"Firmware file not found: {firmware_file}")
     elif args.command == 'read_flash':
         address = int(args.address, 16)
-        if not (0x0 <= address <= 0xFFFFFFFF):
-            parser.error(f"Address {args.address} out of range")
         size = int(args.size, 16)
-        if not (0x0 <= size <= 0xFFFFFFFF):
-            parser.error(f"Size {args.size} out of range")
+        board_def.check_flash_addr(address, size=size)
     elif args.command == 'erase_flash':
         address = int(args.address, 16)
-        if not (0x0 <= address <= 0xFFFFFFFF):
-            parser.error(f"Address {args.address} out of range")
         size = int(args.size, 16)
-        if not (0x0 <= size <= 0xFFFFFFFF):
-            parser.error(f"Size {args.size} out of range")
+        board_def.check_flash_addr(address, size=size)
     else:
         parser.print_help()
         return
@@ -480,6 +525,9 @@ def main():
             address = int(address_str, 16)
             with open(firmware_file, 'rb') as f:
                 firmware_data = f.read()
+
+            board_def.check_flash_addr(address, size=len(firmware_data))
+
             logging.info(f"Downloading {firmware_file} to address {address:#010x}")
             if not programmer.download_firmware(address, firmware_data, autostart=False):
                 logging.error("Firmware download failed")
