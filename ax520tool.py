@@ -32,31 +32,32 @@ class AX520ToolException(Exception):
 
 class AX520BoardHelper:
     BOARD_DEFS = {
-        'M5_TimerCamera520':{
+        'M5_TimerCamera520_V10':{
             'flash_size': 0xF42400,
             'flash_start_addr': 0x3000000,
             'flash_range': (0x3000000, 0x3F42400),
             'partition': {
                 'miniboot': 0x3000000,
-                'uboot': 0x3010000,
-                'kernel': 0x3080000,
-                'rootfs': 0x3380000
+                'uboot': 0x3006000,
+                'env': 0x302F000,
+                'kernel': 0x3030000,
+                'rootfs': 0x3130000
             }
         }
     }
 
-    def __init__(self, board_name='M5_TimerCamera520'):
+    def __init__(self, board_name='M5_TimerCamera520_V10'):
         self.board_name = board_name
         if board_name not in self.BOARD_DEFS:
             logger.warning(f'Unable to locate the board {board_name}, falling back to default.')
-            self.board_name = 'M5_TimerCamera520'
+            self.board_name = 'M5_TimerCamera520_V10'
         self.defs = self.BOARD_DEFS[self.board_name]
 
     @staticmethod
     def in_range(value, range):
         return (value >= range[0] and value <= range[1])
 
-    def check_flash_addr(self, addr, end_addr=None, size=None):
+    def check_flash_addr(self, addr, end_addr=None, size=None, partition=None):
         if not self.in_range(addr, self.defs['flash_range']):
             raise AX520ToolException.InvalidFlashRange(addr, self.defs['flash_range'])
         
@@ -68,6 +69,27 @@ class AX520BoardHelper:
             if not self.in_range(addr+size, self.defs['flash_range']):
                 raise AX520ToolException.InvalidFlashRange(addr+size, self.defs['flash_range'])
         
+        # Check not passing sector with name erase
+        if partition:
+            if partition in self.defs['partition']:
+                for part in self.defs['partition']:
+                    if self.defs['partition'][part] > self.defs['partition'][partition]:
+                        if size is not None:
+                            if self.defs['partition'][part] < self.defs['partition'][partition] + size:
+                                raise AX520ToolException.InvalidFlashRange(self.defs['partition'][part], (self.defs['partition'][partition], self.defs['partition'][partition] + size))
+                        else:
+                            raise AX520ToolException.InvalidFlashRange(self.defs['partition'][part], (self.defs['partition'][partition], self.defs['partition'][partition] + size))
+                    elif self.defs['partition'][part] < self.defs['partition'][partition]:
+                        if size is not None:
+                            if self.defs['partition'][part] + size > self.defs['partition'][partition]:
+                                raise AX520ToolException.InvalidFlashRange(self.defs['partition'][part], (self.defs['partition'][partition] - size, self.defs['partition'][partition]))
+                        else:
+                            raise AX520ToolException.InvalidFlashRange(self.defs['partition'][part], (self.defs['partition'][partition] - size, self.defs['partition'][partition]))
+                    else:
+                        continue
+            else:
+                raise AX520ToolException.InvalidNumberFormat(partition)
+
         return True
 
     def number_helper(self, number_or_str):
@@ -200,8 +222,6 @@ class AX520Programmer:
             if ack == self.HDBOOT_NOTIFY:
                 logger.debug("Received HDBOOT_NOTIFY")
                 self.boot_mode = 'HDBOOT'
-                self.serial_port.reset_input_buffer()
-                self.serial_port.reset_output_buffer()
                 self._send(self.DEBUG_CMD)
                 ack = self._recv(expected_cmd=self.ACK_OK, timeout=1)
                 if ack == self.ACK_OK:
@@ -213,8 +233,6 @@ class AX520Programmer:
             elif ack == self.MINIBOOT_NOTIFY:
                 logger.debug("Received MINIBOOT_NOTIFY")
                 self.boot_mode = 'MINIBOOT'
-                self.serial_port.reset_input_buffer()
-                self.serial_port.reset_output_buffer()
                 self._send(self.DEBUG_CMD)
                 # In MINIBOOT mode, the device may not respond to DEBUG_CMD with ACK_OK
                 logger.info("Handshake successful in MINIBOOT mode")
@@ -310,8 +328,15 @@ class AX520Programmer:
                 remaining = total_size - pos
                 if remaining < chunk_size:
                     chunk_size = remaining
+                
+                if (chunk_size & 0x03) > 0:
+                    chunk_size = chunk_size & 0x00FFFFFC
+                    chunk_size += 4
 
                 chunk = firmware_data[pos:pos + chunk_size]
+
+                if chunk_size > len(chunk):
+                    chunk += b'\xFF' * (chunk_size - len(chunk))
 
                 if not self._download_chunk(address + pos, chunk):
                     logger.error("Firmware download failed at position {}".format(pos))
@@ -484,10 +509,11 @@ class AX520Programmer:
 def main():
     """Main function to parse arguments and execute commands."""
     parser = argparse.ArgumentParser(description="AX520 programmer tool")
-    parser.add_argument("-b", "--board", default='M5_TimerCamera520', help="Board name")
+    parser.add_argument("-b", "--board", default='M5_TimerCamera520_V10', help="Board name")
     parser.add_argument("-p", "--port", required=True, help="Serial port name")
     parser.add_argument("-r", "--reboot", help="Reboot after flashing", action="store_true")
     parser.add_argument("-c", "--check", help="Verify firmware after flashing", action="store_true")
+    parser.add_argument("-e", "--erase-env", help="Erase env partition before any operation", action="store_true")
 
     subparsers = parser.add_subparsers(dest='command', help='Operations (burn)')
 
@@ -548,6 +574,31 @@ def main():
         logger.error("Handshake failed")
         programmer.close_connection()
         return
+
+    # Erase env partition if requested
+    if args.erase_env:
+        if 'env' in board_def.defs['partition']:
+            env_addr = board_def.defs['partition']['env']
+            # Calculate size: difference between env address and next partition
+            next_addr = None
+            for part, addr in board_def.defs['partition'].items():
+                if addr > env_addr and (next_addr is None or addr < next_addr):
+                    next_addr = addr
+            
+            if next_addr is None:
+                # If env is the last partition, use 64KB as default size
+                env_size = 64 * 1024
+            else:
+                env_size = next_addr - env_addr
+            
+            logger.info(f"Erasing env partition at address {env_addr:#010x}, size {env_size:#010x} bytes")
+            if not programmer.erase(env_addr, env_size):
+                logger.error("Failed to erase env partition")
+                programmer.close_connection()
+                return
+            logger.info("Env partition erased successfully")
+        else:
+            logger.warning("No env partition found for this board")
 
     if args.command == 'write_flash':
         for address_str, firmware_file in pairs:
